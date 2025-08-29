@@ -1,0 +1,112 @@
+# BOLLINGER BREAKOUT BOT
+import MetaTrader5 as mt5
+import pandas as pd
+import time
+from datetime import datetime
+
+# CONFIGURATION 
+symbol = "Boom 500 Index"
+timeframe = mt5.TIMEFRAME_M1
+lot = 9.99
+boll_period = 20
+boll_deviation = 2
+check_interval = 60  # seconds between checks
+auto_close_time = 300  # seconds to wait before closing the trade
+
+# INITIALIZE MT5
+if not mt5.initialize():
+    print("❌ MT5 Initialization failed:", mt5.last_error())
+    quit()
+print("✅ Connected to MetaTrader 5")
+
+# FUNCTIONS
+def get_data(symbol, timeframe, n=100):
+    bars = mt5.copy_rates_from_pos(symbol, timeframe, 0, n)
+    df = pd.DataFrame(bars)
+    df['time'] = pd.to_datetime(df['time'], unit='s')
+    df.set_index('time', inplace=True)
+    return df
+
+def calculate_bollinger_bands(df, period, deviation):
+    df['sma'] = df['close'].rolling(window=period).mean()
+    df['std'] = df['close'].rolling(window=period).std()
+    df['upper'] = df['sma'] + deviation * df['std']
+    df['lower'] = df['sma'] - deviation * df['std']
+    return df
+
+def place_sell():
+    price = mt5.symbol_info_tick(symbol).bid
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": lot,
+        "type": mt5.ORDER_TYPE_SELL,
+        "price": price,
+        "deviation": 20,
+        "magic": 123456,
+        "comment": "BollingerBand_SellOnly",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_FOK
+    }
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(f"❌ Sell order failed: {result.retcode} – {result.comment}")
+        return None
+    else:
+        print(f"✅ SELL order placed at {price} | Ticket: {result.order}")
+        return result.order
+
+def close_trade(ticket):
+    positions = mt5.positions_get(ticket=ticket)
+    if positions is None or len(positions) == 0:
+        print(f"⚠️ No open trade found for ticket {ticket}")
+        return
+
+    position = positions[0]
+    close_price = mt5.symbol_info_tick(symbol).ask  # For SELL, close at ask
+
+    close_request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": position.volume,
+        "type": mt5.ORDER_TYPE_BUY,  # Opposite of SELL
+        "position": ticket,
+        "price": close_price,
+        "deviation": 20,
+        "magic": 123456,
+        "comment": "Auto-close after 2 mins",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_FOK,
+    }
+
+    result = mt5.order_send(close_request)
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+        print(f"✅ Trade {ticket} closed at {close_price}")
+    else:
+        print(f"❌ Failed to close trade {ticket}: {result.retcode} – {result.comment}")
+
+# MAIN LOOP
+print("🚀 Bollinger Band Sell-Only Bot with Auto-Close Started")
+while True:
+    df = get_data(symbol, timeframe, 100)
+    df = calculate_bollinger_bands(df, boll_period, boll_deviation)
+
+    prev = df.iloc[-2]
+    curr = df.iloc[-1]
+
+    # SELL condition: price crosses above upper band
+    if prev['close'] < prev['upper'] and curr['close'] > curr['upper']:
+        print(f"{datetime.now()} 📉 SELL signal detected")
+        ticket = place_sell()
+
+        if ticket:
+            print(f"⏳ Waiting {auto_close_time} seconds before auto-closing trade {ticket}...")
+            time.sleep(auto_close_time)
+            close_trade(ticket)
+    else:
+        print(f"{datetime.now()} ⏳ No trade")
+
+    time.sleep(check_interval)
+
+
+
